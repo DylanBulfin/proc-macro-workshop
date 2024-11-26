@@ -32,23 +32,33 @@ pub fn derive(input: TokenStream) -> TokenStream {
         Data::Enum(_) | Data::Union(_) => unimplemented!(),
     };
 
-    let required_check = quote! {
-        #(
-            if !#arg_op && self.#arg_id.is_none() {
-                return Err(format!("Field {} is None", stringify!(#arg_id)).into());
+    let required_checks = arg_id.iter().zip(arg_op.iter()).map(|(id, op)| {
+        let span = id.span();
+
+        if !op {
+            quote_spanned! {span=>
+                if self.#id.is_none() {
+                    return Err(format!("Field {} is None", stringify!(#id)).into());
+                }
             }
-        )*
-    };
-
-    let constructor = quote! {
-        #ident {
-            #(
-                #arg_id: if #arg_op {self.#arg_id} else {self.#arg_id.take().unwrap()}
-            ),*
+        } else {
+            quote! {}
         }
-    };
+    });
 
-    quote! {
+    let constructor_fields = arg_id.iter().zip(arg_op.iter()).map(|(id, op)| {
+        let span = id.span();
+
+        if *op {
+            quote_spanned! {span=> #id: self.#id.take()}
+        } else {
+            quote_spanned! {span=>
+                #id: self.#id.take().unwrap()
+            }
+        }
+    });
+
+    let res: proc_macro::TokenStream = quote! {
         pub struct #builder_ident {
             #(
                 #arg_id: Option<#arg_ty>
@@ -64,12 +74,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
             )*
 
             pub fn build(&mut self) -> Result<#ident, Box<dyn std::error::Error>> {
-                #required_check
+                #(#required_checks)*
 
                 Ok(
                     #ident {
                         #(
-                            #arg_id: if #arg_op {self.#arg_id} else {self.#arg_id.take().unwrap()}
+                            #constructor_fields
                         ),*
                     }
                 )
@@ -86,30 +96,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
     }
-    .into()
-}
+    .into();
 
-//     Type::Path(
-//         TypePath {
-//             qself: None,
-//             path: Path {
-//                 segments: [
-//                     PathSegment {
-//                         ident: "Option",
-//                         arguments: PathArguments::AngleBracketed(
-//                             AngleBracketedGenericArguments {
-//                                 args: [
-//                                     GenericArgument::Type(
-//                                         ...
-//                                     ),
-//                                 ],
-//                             },
-//                         ),
-//                     },
-//                 ],
-//             },
-//         },
-//     )
+    res
+    //panic!("{}", res.to_string());
+}
 
 fn try_strip_arg(arg_ty: Type) -> (Type, bool) {
     'outer: {
