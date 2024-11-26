@@ -139,11 +139,11 @@ where
 
         if field.each_attr.is_some() {
             quote! {
-                #id: Some(Vec::new())
+                #id: std::option::Option::Some(std::vec::Vec::new())
             }
         } else {
             quote! {
-                #id: None
+                #id: std::option::Option::None
             }
         }
     });
@@ -182,7 +182,7 @@ where
             if &each_id != id {
                 setters.push(quote! {
                     pub fn #id(&mut self, #id: #ty) -> &mut Self {
-                        self.#id = Some(#id);
+                        self.#id = std::option::Option::Some(#id);
                         self
                     }
                 });
@@ -191,12 +191,12 @@ where
             each_funcs.push(quote! {
                 pub fn #each_id(&mut self, #each_id: #inner_ty) -> &mut Self {
                     match self.#id {
-                        Some(ref mut v) => v.push(#each_id),
+                        std::option::Option::Some(ref mut v) => v.push(#each_id),
                         None => {
-                            let mut new_val = Vec::new();
+                            let mut new_val = std::vec::Vec::new();
                             new_val.push(#each_id);
 
-                            self.#id = Some(new_val);
+                            self.#id = std::option::Option::Some(new_val);
                         }
                     }
 
@@ -206,7 +206,7 @@ where
         } else {
             setters.push(quote! {
                 pub fn #id(&mut self, #id: #ty) -> &mut Self {
-                    self.#id = Some(#id);
+                    self.#id = std::option::Option::Some(#id);
                     self
                 }
             });
@@ -215,7 +215,7 @@ where
         if !opt {
             field_checks.push(quote! {
                 if self.#id.is_none() {
-                    return Err(format!("Field {} is unexpectedly None", stringify!(#id)).into());
+                    return std::result::Result::Err(format!("Field {} is unexpectedly None", stringify!(#id)).into());
                 }
             })
         }
@@ -241,7 +241,7 @@ where
                 #each_funcs
             )*
 
-            pub fn build(&mut self) -> Result<#ident, Box<dyn std::error::Error>> {
+            pub fn build(&mut self) -> std::result::Result<#ident, std::boxed::Box<dyn std::error::Error>> {
                 #(
                     #field_checks
                 )*
@@ -269,7 +269,7 @@ where
         let span = id.span();
 
         quote_spanned! {span=>
-            #id: Option<#ty>
+            #id: std::option::Option<#ty>
         }
     });
 
