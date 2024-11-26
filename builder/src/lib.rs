@@ -1,130 +1,211 @@
-use proc_macro::TokenStream;
+use core::slice::SlicePattern;
+use std::iter::Map;
+
+use proc_macro2::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
 use syn::{
-    parse_macro_input, spanned::Spanned, AngleBracketedGenericArguments, Data, DataStruct,
-    DeriveInput, Fields, GenericArgument, Ident, Path, PathArguments, PathSegment, Type, TypePath,
+    braced,
+    parse::{Parse, ParseStream},
+    parse_macro_input,
+    punctuated::Punctuated,
+    spanned::Spanned,
+    token::Brace,
+    AngleBracketedGenericArguments, Attribute, Data, DataStruct, DeriveInput, Fields,
+    GenericArgument, Ident, Path, PathArguments, PathSegment, Token, Type, TypePath, Visibility,
 };
 
-#[proc_macro_derive(Builder)]
-pub fn derive(input: TokenStream) -> TokenStream {
-    let tree = parse_macro_input!(input as DeriveInput);
-
-    let ident = &tree.ident;
-    let builder_ident = format_ident!("{}Builder", ident);
-
-    let mut arg_id = Vec::new();
-    let mut arg_ty = Vec::new();
-    let mut arg_op = Vec::new();
-
-    match tree.data {
-        Data::Struct(data) => match data.fields {
-            Fields::Named(fields) => {
-                for f in fields.named {
-                    arg_id.push(f.ident);
-
-                    let (ty, opt) = try_strip_arg(f.ty);
-                    arg_ty.push(ty);
-                    arg_op.push(opt);
-                }
-            }
-            Fields::Unnamed(_) | Fields::Unit => unimplemented!(),
-        },
-        Data::Enum(_) | Data::Union(_) => unimplemented!(),
-    };
-
-    let required_checks = arg_id.iter().zip(arg_op.iter()).map(|(id, op)| {
-        let span = id.span();
-
-        if !op {
-            quote_spanned! {span=>
-                if self.#id.is_none() {
-                    return Err(format!("Field {} is None", stringify!(#id)).into());
-                }
-            }
-        } else {
-            quote! {}
-        }
-    });
-
-    let constructor_fields = arg_id.iter().zip(arg_op.iter()).map(|(id, op)| {
-        let span = id.span();
-
-        if *op {
-            quote_spanned! {span=> #id: self.#id.take()}
-        } else {
-            quote_spanned! {span=>
-                #id: self.#id.take().unwrap()
-            }
-        }
-    });
-
-    let res: proc_macro::TokenStream = quote! {
-        pub struct #builder_ident {
-            #(
-                #arg_id: Option<#arg_ty>
-            ),*
-        }
-
-        impl #builder_ident {
-            #(
-                pub fn #arg_id(&mut self, #arg_id: #arg_ty) -> &mut Self {
-                    self.#arg_id = Some(#arg_id);
-                    self
-                }
-            )*
-
-            pub fn build(&mut self) -> Result<#ident, Box<dyn std::error::Error>> {
-                #(#required_checks)*
-
-                Ok(
-                    #ident {
-                        #(
-                            #constructor_fields
-                        ),*
-                    }
-                )
-            }
-        }
-
-        impl #ident {
-            pub fn builder() -> #builder_ident {
-                #builder_ident {
-                    #(
-                        #arg_id: None
-                    ),*
-                }
-            }
-        }
-    }
-    .into();
-
-    res
-    //panic!("{}", res.to_string());
+struct StructItem {
+    //_attr: Vec<Attribute>,
+    vis: Visibility,
+    //_struct: Token![struct],
+    ident: Ident,
+    //_brace: Brace,
+    fields: Punctuated<StructField, Token![,]>,
 }
 
-fn try_strip_arg(arg_ty: Type) -> (Type, bool) {
-    'outer: {
-        if let Type::Path(TypePath {
-            qself: None,
-            path: Path { ref segments, .. },
-            ..
-        }) = arg_ty
-        {
-            if segments.len() == 1 && segments[0].ident == "Option" {
-                if let PathArguments::AngleBracketed(AngleBracketedGenericArguments {
-                    ref args,
-                    ..
-                }) = segments[0].arguments
-                {
-                    if args.len() == 1 {
-                        if let GenericArgument::Type(ref t) = args[0] {
-                            break 'outer (t.to_owned(), true);
-                        }
+struct StructField {
+    attr: Vec<Attribute>,
+    //_vis: Visibility,
+    ident: Ident,
+    //_colon: Token![:],
+
+    // This marks whether or not the base field was optional
+    // If so we handle it specially
+    opt: bool,
+    // For base types that are not options, this is the base type. For base types that are
+    // options we store the inside of the Option instead. E.g. for type `String` it is
+    // String, and for type `Option<Vec<String>>` it is `Vec<String>`
+    ty: Type,
+}
+
+impl Parse for StructItem {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let _attr = input.call(Attribute::parse_outer)?;
+        let vis = input.parse()?;
+        let _struct: Token![struct] = input.parse()?;
+        let ident = input.parse()?;
+
+        let content;
+        let _brace: Brace = braced!(content in input);
+        let fields = content.parse_terminated(Parse::parse, Token![,])?;
+
+        Ok(Self { vis, ident, fields })
+    }
+}
+
+impl Parse for StructField {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let attr = input.call(Attribute::parse_outer)?;
+        let _vis: Visibility = input.parse()?;
+        let ident = input.parse()?;
+        let _colon: Token![:] = input.parse()?;
+        let ty = input.parse()?;
+
+        if let Some(inner_ty) = check_field_optional(&ty) {
+            Ok(Self {
+                attr,
+                ident,
+                ty: inner_ty,
+                opt: true,
+            })
+        } else {
+            Ok(Self {
+                attr,
+                ident,
+                ty,
+                opt: false,
+            })
+        }
+    }
+}
+
+#[proc_macro_derive(Builder)]
+pub fn derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let item = parse_macro_input!(input as StructItem);
+
+    let ident = item.ident;
+    let builder_ident = format_ident!("{}Builder", ident);
+    // Consider if this is necessary
+    let field_vec = item.fields.into_iter().collect::<Vec<_>>();
+
+    let builder_def = builder_definition(&builder_ident, &item.vis, field_vec.as_slice());
+    let builder_impl = builder_impl(&ident, &builder_ident, field_vec.as_slice());
+
+    quote! {
+        #builder_impl
+
+        #builder_def
+    }
+    .into()
+}
+
+fn base_impl<'a, I>(ident: &Ident, builder_ident: &Ident, fields: I) -> TokenStream
+where
+    I: IntoIterator<Item = &'a StructField>,
+{
+}
+
+fn builder_impl<'a, I>(ident: &Ident, builder_ident: &Ident, fields: I) -> TokenStream
+where
+    I: IntoIterator<Item = &'a StructField>,
+{
+    let mut setters: Vec<_> = Vec::new();
+    let mut field_inits: Vec<_> = Vec::new();
+
+    for f in fields {
+        let ty = &f.ty;
+        let id = &f.ident;
+
+        setters.push(quote! {
+            pub fn #id(&mut self, #id: #ty) -> &mut Self {
+                self.#id = Some(#ty);
+            }
+        });
+
+        field_inits.push(quote! {
+            #ty: None
+        });
+    }
+
+    quote! {
+        impl #builder_ident {
+            #(
+                #setters
+            )*
+
+            pub fn build(&mut self) -> Result<#ident, Box<dyn Error>> {
+                #(
+                    #field_inits
+                ),*
+            }
+        }
+    }
+}
+
+fn builder_definition<'a, I>(builder_ident: &Ident, vis: &Visibility, fields: I) -> TokenStream
+where
+    I: IntoIterator<Item = &'a StructField>,
+{
+    let builder_fields = fields.into_iter().map(|f| {
+        let id = &f.ident;
+        let ty = &f.ty;
+
+        let span = id.span();
+
+        quote_spanned! {span=>
+            #id: Option<#ty>
+        }
+    });
+
+    quote! {
+        #vis struct #builder_ident {
+            #(
+                #builder_fields
+            ),*
+        }
+    }
+}
+
+//     Type::Path(
+//         TypePath {
+//             qself: None,
+//             path: Path {
+//                 segments: [
+//                     PathSegment {
+//                         ident: "Option",
+//                         arguments: PathArguments::AngleBracketed(
+//                             AngleBracketedGenericArguments {
+//                                 args: [
+//                                     GenericArgument::Type(
+//                                         ...
+//                                     ),
+//                                 ],
+//                             },
+//                         ),
+//                     },
+//                 ],
+//             },
+//         },
+//     )
+fn check_field_optional(ty: &Type) -> Option<Type> {
+    if let Type::Path(TypePath {
+        qself: None,
+        path: Path { segments, .. },
+        ..
+    }) = ty
+    {
+        if segments.len() == 1 && segments[0].ident == "Option" {
+            if let PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) =
+                &segments[0].arguments
+            {
+                if args.len() == 1 {
+                    if let GenericArgument::Type(t) = &args[0] {
+                        return Some(t.clone());
                     }
                 }
             }
         }
-
-        break 'outer (arg_ty, false);
     }
+
+    None
 }
